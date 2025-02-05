@@ -19,76 +19,96 @@ exports.configDialog = {
 
 exports.init = async api => {
     const _ = api.require('lodash')
-    let client
-    let connected = Promise.resolve(false)
     const db = await api.openDb('data.kv')
+    const id = exports.repo
     const timer = setInterval(checkSync, 60_000)
-    const unsub = api.subscribeConfig('url', async v => {
-        if (!v) return
-        if (!v.includes('//'))
-            v = 'ldap://' + v
-        await close()
-        const Client = require('ldapjs-client')
-        client = new Client({ url: v, timeout: 5000, tls: { rejectUnauthorized: api.getConfig('checkCert') } })
-        connected = client.bind(api.getConfig('username'), api.getConfig('password')).then(() => {
-            api.log("connected")
-            void checkSync()
-            return true
-        }, e => {
-            api.log("connection failed: " + String(e)) // after getting 'null' as e.message, it's better to print whole e
-            return false
-        })
+    const unsub = api.subscribeConfig(['url', 'checkCert', 'username', 'password'], checkConnection)
+    const undo = api.events.on('clearTextLogin', async req => {
+        const a = api.getAccount(req.username)
+        if (a?.plugin?.id !== id) return
+        const client = await connect(a.plugin.dn, req.password)
+        if (!client) return false
+        client.destroy()
+        return true
     })
+    checkSync()
     return {
         async unload() {
+            undo()
             clearInterval(timer)
             unsub()
-            await close()
         }
     }
 
-    async function close() {
-        await client?.unbind()
-        await client?.destroy()
+    function checkConnection() {
+        connect().then(c => c.destroy())
+    }
+
+    async function connect(u=api.getConfig('username'), p=api.getConfig('password')) {
+        let url = api.getConfig('url')
+        if (!url) return
+        if (!url.includes('//'))
+            url = 'ldap://' + url
+        const Client = require('ldapjs-client')
+        const client = new Client({ url: url, timeout: 5000, tls: { rejectUnauthorized: api.getConfig('checkCert') } })
+        return client.bind(u, p).then(() => {
+            api.log("connected")
+            return client
+        }, e => {
+            client.destroy()
+            api.log("connection failed: " + String(e)) // after getting 'null' as e.message, it's better to print whole e
+        })
     }
 
     async function checkSync() {
-        if (!api.getConfig('url')) return
-        if (!await connected) return api.log("not connected")
         if (Date.now() - (db.getSync('lastSync') || 0) < api.getConfig('syncEvery') * 3600_000) return
-        api.log("sync started")
-        const entries = await client.search(api.getConfig('baseDN'), {
-            scope: 'sub',
-            attributes: ['uid', 'dn'], // uid for username, dn to ldap.bind
-            filter: api.getConfig('filter'),
-            sizeLimit: 1000,
-        })
-        const id = exports.repo
-        const added = []
-        const conflicts = []
-        const removed = []
-        for (const e of entries) {
-            const { uid, ...rest } = e
-            if (!uid) continue
-            const account = api.getAccount(uid)
-            if (!account) {
-                rest.id = id
-                rest.isGroup = false
-                api.addAccount(uid, { plugin: rest })
-                added.push(uid)
+        const client = await connect()
+        if (!client) return
+        try {
+            api.log("sync started")
+            const usernameFields = ['sAMAccountName', 'uid', 'cn'] // best to worst
+            const entries = await client.search(api.getConfig('baseDN'), {
+                scope: 'sub',
+                attributes: [...usernameFields, 'dn'], // uid for username, dn to ldap.bind
+                filter: api.getConfig('filter'),
+                sizeLimit: 1000,
+            })
+            const added = []
+            const conflicts = []
+            const removed = []
+            const skipped = []
+            for (const e of entries) {
+                if (!e.dn) continue // invalid
+                const k = _.find(usernameFields, k => e[k])
+                const u = e[k]
+                if (!u) continue
+                const account = api.getAccount(u)
+                const rest = _.omit(e, usernameFields)
+                if (!account) {
+                    rest.id = id
+                    rest.isGroup = false
+                    api.addAccount(u, { plugin: rest })
+                    added.push(u)
+                }
+                else if (account.plugin?.id !== id)
+                    conflicts.push(u)
+                else
+                    skipped.push(u)
             }
-            else if (account.plugin?.id !== id)
-                conflicts.push(uid)
-        }
 
-        for (const [u, a] of Object.entries(api.getHfsConfig('accounts')))
-            if (a.plugin?.id === id) // ours
-                if (!_.find(entries, { uid: u }) && api.delAccount(u))
-                    removed.push(u)
-        api.log(`records skipped: ${entries.length - added.length - removed.length - conflicts.length}`)
-        if (added.length) api.log(`accounts added: ${added.join(', ')}`)
-        if (removed.length) api.log(`accounts removed: ${removed.join(', ')}`)
-        if (conflicts.length) api.log(`conflicts found: ${conflicts.join(', ')}`)
-        db.put('lastSync', new Date) // human readable
+            for (const [u, a] of Object.entries(api.getHfsConfig('accounts')))
+                if (a.plugin?.id === id) // ours
+                    if (!skipped.includes(u) && !added.includes(u) && !conflicts.includes(u))
+                        if (api.delAccount(u))
+                            removed.push(u)
+            api.log(`records skipped: ${entries.length - added.length - removed.length - conflicts.length}`)
+            if (added.length) api.log(`accounts added: ${added.join(', ')}`)
+            if (removed.length) api.log(`accounts removed: ${removed.join(', ')}`)
+            if (conflicts.length) api.log(`conflicts found: ${conflicts.join(', ')}`)
+            db.put('lastSync', new Date) // human-readable
+        }
+        finally {
+            client.destroy()
+        }
     }
 }
