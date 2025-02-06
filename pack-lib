@@ -1,0 +1,9 @@
+npm i ldapjs-client
+echo "module.exports = require('ldapjs-client')" > lib.js
+ncc build lib.js --target es2022
+mv dist/index.js dist/ldapjs-client.js
+rm -rf node_modules package*.json lib.js
+# avoid "Buffer" warning
+sed -i bak -E 's/new Buffer\((val\.length|0)\)/Buffer.alloc(\1)/g' dist/ldapjs-client.js
+sed -i bak -E 's/new Buffer\((.+)\)/Buffer.from(\1)/g' dist/ldapjs-client.js
+rm dist/*bak
