@@ -49,7 +49,7 @@ exports.init = async api => {
         if (!url) return
         if (!url.includes('//'))
             url = 'ldap://' + url
-        const Client = require('ldapjs-client')
+        const Client = require('./ldapjs-client')
         const client = new Client({ url: url, timeout: 5000, tls: { rejectUnauthorized: api.getConfig('checkCert') } })
         return client.bind(u, p).then(() => {
             api.log("connected")
@@ -65,11 +65,10 @@ exports.init = async api => {
         const client = await connect()
         if (!client) return
         try {
-            api.log("sync started")
             const usernameFields = ['sAMAccountName', 'uid', 'cn'] // best to worst
             const entries = await client.search(api.getConfig('baseDN'), {
                 scope: 'sub',
-                attributes: [...usernameFields, 'dn'], // uid for username, dn to ldap.bind
+                attributes: [...usernameFields, 'dn'], // dn to ldap.bind
                 filter: api.getConfig('filter'),
                 sizeLimit: 1000,
             })

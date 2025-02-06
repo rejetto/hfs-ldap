@@ -1,0 +1,5 @@
+npm i ldapjs-client
+echo "module.exports = require('ldapjs-client')" > lib.js
+ncc build lib.js --target es2022
+mv dist/index.js dist/ldapjs-client.js
+rm -rf node_modules package*.json lib.js
