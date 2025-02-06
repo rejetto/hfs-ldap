@@ -8,7 +8,7 @@ exports.config = {
     url: { sm: 9, label: "LDAP server URL" },
     checkCert: { sm: 3, type: 'boolean', label: "Check certificate" },
     username: { sm: 6 },
-    password: { sm: 6, type: 'password', },
+    password: { sm: 6, inputProps: { type: 'password' }, },
     syncEvery: { sm: 6, type: 'number', unit: 'hours', min: 0, step: 0.1, defaultValue: 1, helperText: "Accepting values less than 1" },
     baseDN: { sm: 6, defaultValue: 'dc=example,dc=com' },
     filter: { defaultValue: '(objectClass=person)' },
@@ -41,7 +41,7 @@ exports.init = async api => {
     }
 
     function checkConnection() {
-        connect().then(c => c.destroy())
+        connect().then(c => c?.destroy())
     }
 
     async function connect(u=api.getConfig('username'), p=api.getConfig('password')) {
@@ -72,6 +72,10 @@ exports.init = async api => {
                 filter: api.getConfig('filter'),
                 sizeLimit: 1000,
             })
+            const groupName = 'ldap-group'
+            const group = _.findKey(api.getHfsConfig('accounts'), x => x.plugin?.id === id && !x.plugin.dn) // group is the only one without dn
+                || api.addAccount(groupName, { plugin: { id } }) && groupName
+
             const added = []
             const conflicts = []
             const removed = []
@@ -86,7 +90,7 @@ exports.init = async api => {
                 if (!account) {
                     rest.id = id
                     rest.isGroup = false
-                    api.addAccount(u, { plugin: rest })
+                    api.addAccount(u, { plugin: rest, belongs: [group] })
                     added.push(u)
                 }
                 else if (account.plugin?.id !== id)
@@ -96,7 +100,7 @@ exports.init = async api => {
             }
 
             for (const [u, a] of Object.entries(api.getHfsConfig('accounts')))
-                if (a.plugin?.id === id) // ours
+                if (u !== group && a.plugin?.id === id) // ours
                     if (!skipped.includes(u) && !added.includes(u) && !conflicts.includes(u))
                         if (api.delAccount(u))
                             removed.push(u)
