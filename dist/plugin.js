@@ -1,17 +1,18 @@
 exports.name = "LDAP authentication"
 exports.description = ""
 exports.version = 0.1
-exports.apiRequired = 1
+exports.apiRequired = 12
 exports.repo = "rejetto/hfs-ldap"
 
 exports.config = {
     url: { sm: 9, label: "LDAP server URL" },
     checkCert: { sm: 3, type: 'boolean', label: "Check certificate" },
-    username: { sm: 6 },
-    password: { sm: 6, inputProps: { type: 'password' }, },
-    syncEvery: { sm: 6, type: 'number', unit: 'hours', min: 0, step: 0.1, defaultValue: 1, helperText: "Accepting values less than 1" },
-    baseDN: { sm: 6, defaultValue: 'dc=example,dc=com' },
-    filter: { defaultValue: '(objectClass=person)' },
+    username: { sm: 9, label: "Username (DN)" },
+    password: { sm: 3, inputProps: { type: 'password' }, },
+    filter: { sm: 9, defaultValue: '(objectClass=person)' },
+    scope: { sm: 3, type: 'select', defaultValue: 'sub', options: ['base', 'one', 'sub'] },
+    baseDN: { sm: 9, label: "Base DN", defaultValue: 'dc=example,dc=com' },
+    syncEvery: { sm: 3, type: 'number', unit: 'hours', min: 0.01, step: 0.01, defaultValue: 0.1, required: true },
 }
 exports.configDialog = {
     maxWidth: 'sm'
@@ -22,7 +23,7 @@ exports.init = async api => {
     const db = await api.openDb('data.kv')
     const id = exports.repo
     const timer = setInterval(checkSync, 60_000)
-    const unsub = api.subscribeConfig(['url', 'checkCert', 'username', 'password'], checkConnection)
+    api.subscribeConfig(['url', 'checkCert', 'username', 'password'], checkConnection)
     const undo = api.events.on('clearTextLogin', async req => {
         const a = api.getAccount(req.username)
         if (a?.plugin?.id !== id) return
@@ -36,12 +37,11 @@ exports.init = async api => {
         async unload() {
             undo()
             clearInterval(timer)
-            unsub()
         }
     }
 
-    function checkConnection() {
-        connect().then(c => c?.destroy())
+    async function checkConnection() {
+        void (await connect())?.destroy()
     }
 
     async function connect(u=api.getConfig('username'), p=api.getConfig('password')) {
@@ -51,6 +51,8 @@ exports.init = async api => {
             url = 'ldap://' + url
         const Client = require('./ldapjs-client')
         const client = new Client({ url: url, timeout: 5000, tls: { rejectUnauthorized: api.getConfig('checkCert') } })
+        const last = db.getSync('lastSync')
+        api.log(`next sync: ${!last ? "now" : api.misc.formatTimestamp(new Date(last.getTime() + api.getConfig('syncEvery') * 3600_000))}`)
         return client.bind(u, p).then(() => {
             api.log("connected")
             return client
@@ -67,8 +69,7 @@ exports.init = async api => {
         try {
             const usernameFields = ['sAMAccountName', 'uid', 'cn'] // best to worst
             const entries = await client.search(api.getConfig('baseDN'), {
-                scope: 'sub',
-                attributes: [...usernameFields, 'dn'], // dn to ldap.bind
+                scope: api.getConfig('scope'),
                 filter: api.getConfig('filter'),
                 sizeLimit: 1000,
             })
@@ -82,11 +83,11 @@ exports.init = async api => {
             const skipped = []
             for (const e of entries) {
                 if (!e.dn) continue // invalid
-                const k = _.find(usernameFields, k => e[k])
+                const k = _.find(userNameFields, k => e[k])
                 const u = e[k]
                 if (!u) continue
                 const account = api.getAccount(u)
-                const rest = _.omit(e, usernameFields)
+                const rest = _.omit(e, userNameFields)
                 if (!account) {
                     rest.id = id
                     rest.isGroup = false
@@ -104,7 +105,7 @@ exports.init = async api => {
                     if (!skipped.includes(u) && !added.includes(u) && !conflicts.includes(u))
                         if (api.delAccount(u))
                             removed.push(u)
-            api.log(`records skipped: ${entries.length - added.length - removed.length - conflicts.length}`)
+            api.log(`records skipped: ${skipped.length}`)
             if (added.length) api.log(`accounts added: ${added.join(', ')}`)
             if (removed.length) api.log(`accounts removed: ${removed.join(', ')}`)
             if (conflicts.length) api.log(`conflicts found: ${conflicts.join(', ')}`)
