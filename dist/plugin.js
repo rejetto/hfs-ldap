@@ -1,6 +1,6 @@
 exports.name = "LDAP authentication"
 exports.description = ""
-exports.version = 0.1
+exports.version = 0.21
 exports.apiRequired = 12
 exports.repo = "rejetto/hfs-ldap"
 
@@ -9,18 +9,22 @@ exports.config = {
     checkCert: { sm: 3, type: 'boolean', label: "Check certificate" },
     username: { sm: 9, label: "Username", helperText: "Bind DN" },
     password: { sm: 3, inputProps: { type: 'password' }, },
-    userFilter: { sm: 9, defaultValue: '(objectClass=person)' },
-    loginField: { sm: 3, placeholder: "automatic" },
-    baseDN: { sm: 6, label: "Base DN", defaultValue: 'dc=example,dc=com' },
-    scope: { sm: 3, type: 'select', defaultValue: 'sub', options: ['base', 'one', 'sub'] },
-    syncEvery: { sm: 3, type: 'number', unit: 'hours', min: 0.01, step: 0.01, defaultValue: 0.1, required: true },
+    userBaseDN: { sm: 6, label: "Base DN users", defaultValue: 'dc=example,dc=com' },
+    userFilter: { sm: 6, defaultValue: '(objectClass=person)' },
+    loginField: { xs: 4, placeholder: "automatic" },
+    memberField: { xs: 4, defaultValue: 'member' },
+    groupField: { xs: 4, defaultValue: 'memberOf' },
+    groupBaseDN: { sm: 6, label: "Base DN groups", defaultValue: 'dc=example,dc=com' },
+    groupFilter: { sm: 6, defaultValue: '(objectClass=group)' },
+    scope: { xs: 3, type: 'select', defaultValue: 'sub', options: ['base', 'one', 'sub'] },
+    syncEvery: { xs: 3, type: 'number', unit: 'hours', min: 0.01, step: 0.01, defaultValue: 0.1, required: true },
 }
 exports.configDialog = {
     maxWidth: 'sm'
 }
 
 exports.init = async api => {
-    const _ = api.require('lodash')
+    const { _ } = api
     const db = await api.openDb('data.kv')
     const id = exports.repo
     const timer = setInterval(checkSync, 60_000)
@@ -52,8 +56,8 @@ exports.init = async api => {
             url = 'ldap://' + url
         const Client = require('./ldapjs-client')
         const client = new Client({ url: url, timeout: 5000, tls: { rejectUnauthorized: api.getConfig('checkCert') } })
-        const last = db.getSync('lastSync')
-        api.log(`next sync: ${!last ? "now" : api.misc.formatTimestamp(new Date(last.getTime() + api.getConfig('syncEvery') * 3600_000))}`)
+        const next = getNext()
+        api.log(`next sync: ${next < Date.now() ? "now" : api.misc.formatTimestamp(next)} (roughly)`)
         return client.bind(u, p).then(() => {
             api.log("connected")
             return client
@@ -63,26 +67,63 @@ exports.init = async api => {
         })
     }
 
+    function getNext() {
+        const last = db.getSync('lastSync')
+        return last ? new Date(last.getTime() + api.getConfig('syncEvery') * 3600_000) : 0
+    }
+
     async function checkSync() {
-        if (Date.now() - (db.getSync('lastSync') || 0) < api.getConfig('syncEvery') * 3600_000) return
+        if (getNext() > Date.now()) return
         const client = await connect()
         if (!client) return
         try {
-            const x = api.getConfig('loginField')
-            const loginFields = x ? [x] : ['sAMAccountName', 'uid', 'cn'] // best to worst
-            const entries = await client.search(api.getConfig('baseDN'), {
+            const groupField = api.getConfig('groupField')
+            const groupName = 'ldap-group'
+            const pluginGroup = _.findKey(api.getHfsConfig('accounts'), x => x.plugin?.id === id && !x.plugin.dn) // group is the only one without dn
+                || api.addAccount(groupName, { plugin: { id } }) && groupName
+
+            let entries = await client.search(api.getConfig('groupBaseDN'), {
                 scope: api.getConfig('scope'),
-                filter: api.getConfig('userFilter'),
+                filter: api.getConfig('groupFilter'),
                 sizeLimit: 1000,
             })
-            const groupName = 'ldap-group'
-            const group = _.findKey(api.getHfsConfig('accounts'), x => x.plugin?.id === id && !x.plugin.dn) // group is the only one without dn
-                || api.addAccount(groupName, { plugin: { id } }) && groupName
+
+            const loginFields = [api.getConfig('loginField'), 'sAMAccountName', 'uid', 'ou', 'cn'] // best to worst
 
             const added = []
             const conflicts = []
             const removed = []
-            const skipped = []
+            const updated = []
+            const dn2group = {}
+            for (const e of entries) {
+                if (!e.dn) continue // invalid
+                const k = _.find(loginFields, k => e[k])
+                const u = e[k]
+                if (!u) continue
+                const account = api.getAccount(u)
+                const rest = _.omit(e, k)
+                rest.id = id
+                rest.isGroup = true
+                const props = { plugin: rest, belongs: [pluginGroup] }
+                if (!account) {
+                    api.addAccount(u, props)
+                    added.push(u)
+                }
+                else if (account.plugin?.id !== id)
+                    conflicts.push(u)
+                else {
+                    updated.push(u)
+                    api.updateAccount(account, props)
+                }
+                dn2group[e.dn] = u
+            }
+
+            entries = await client.search(api.getConfig('userBaseDN'), {
+                scope: api.getConfig('scope'),
+                filter: api.getConfig('userFilter'),
+                sizeLimit: 1000,
+            })
+
             for (const e of entries) {
                 if (!e.dn) continue // invalid
                 const k = _.find(loginFields, k => e[k])
@@ -90,28 +131,41 @@ exports.init = async api => {
                 if (!u) continue
                 const account = api.getAccount(u)
                 const rest = _.omit(e, loginFields)
+                rest.id = id
+                rest.isGroup = false
+                const belongs = api.misc.wantArray(rest[groupField]).map(dn => dn2group[dn])
+                    .concat(Object.values(dn2group).filter(g => {
+                        const members = api.getAccount(g).plugin[api.getConfig('memberField')]
+                        return members?.includes(e.dn)
+                    }))
+                if (!belongs.length)
+                    belongs.push(pluginGroup)
+                const props = { plugin: rest, belongs }
                 if (!account) {
-                    rest.id = id
-                    rest.isGroup = false
-                    api.addAccount(u, { plugin: rest, belongs: [group] })
+                    api.addAccount(u, props)
                     added.push(u)
                 }
                 else if (account.plugin?.id !== id)
                     conflicts.push(u)
-                else
-                    skipped.push(u)
+                else {
+                    updated.push(u)
+                    api.updateAccount(account, props)
+                }
             }
 
             for (const [u, a] of Object.entries(api.getHfsConfig('accounts')))
-                if (u !== group && a.plugin?.id === id) // ours
-                    if (!skipped.includes(u) && !added.includes(u) && !conflicts.includes(u))
+                if (u !== pluginGroup && a.plugin?.id === id) // ours
+                    if (!updated.includes(u) && !added.includes(u) && !conflicts.includes(u))
                         if (api.delAccount(u))
                             removed.push(u)
-            api.log(`records skipped: ${skipped.length}`)
+            api.log(`records updated: ${updated.length}`)
             if (added.length) api.log(`accounts added: ${added.join(', ')}`)
             if (removed.length) api.log(`accounts removed: ${removed.join(', ')}`)
             if (conflicts.length) api.log(`conflicts found: ${conflicts.join(', ')}`)
             db.put('lastSync', new Date) // human-readable
+        }
+        catch(e) {
+            api.log(String(e))
         }
         finally {
             client.destroy()
