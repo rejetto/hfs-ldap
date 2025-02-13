@@ -7,11 +7,12 @@ exports.repo = "rejetto/hfs-ldap"
 exports.config = {
     url: { sm: 9, label: "LDAP server URL" },
     checkCert: { sm: 3, type: 'boolean', label: "Check certificate" },
-    username: { sm: 9, label: "Username (DN)" },
+    username: { sm: 9, label: "Username", helperText: "Bind DN" },
     password: { sm: 3, inputProps: { type: 'password' }, },
-    filter: { sm: 9, defaultValue: '(objectClass=person)' },
+    userFilter: { sm: 9, defaultValue: '(objectClass=person)' },
+    loginField: { sm: 3, placeholder: "automatic" },
+    baseDN: { sm: 6, label: "Base DN", defaultValue: 'dc=example,dc=com' },
     scope: { sm: 3, type: 'select', defaultValue: 'sub', options: ['base', 'one', 'sub'] },
-    baseDN: { sm: 9, label: "Base DN", defaultValue: 'dc=example,dc=com' },
     syncEvery: { sm: 3, type: 'number', unit: 'hours', min: 0.01, step: 0.01, defaultValue: 0.1, required: true },
 }
 exports.configDialog = {
@@ -67,10 +68,11 @@ exports.init = async api => {
         const client = await connect()
         if (!client) return
         try {
-            const usernameFields = ['sAMAccountName', 'uid', 'cn'] // best to worst
+            const x = api.getConfig('loginField')
+            const loginFields = x ? [x] : ['sAMAccountName', 'uid', 'cn'] // best to worst
             const entries = await client.search(api.getConfig('baseDN'), {
                 scope: api.getConfig('scope'),
-                filter: api.getConfig('filter'),
+                filter: api.getConfig('userFilter'),
                 sizeLimit: 1000,
             })
             const groupName = 'ldap-group'
@@ -83,11 +85,11 @@ exports.init = async api => {
             const skipped = []
             for (const e of entries) {
                 if (!e.dn) continue // invalid
-                const k = _.find(userNameFields, k => e[k])
+                const k = _.find(loginFields, k => e[k])
                 const u = e[k]
                 if (!u) continue
                 const account = api.getAccount(u)
-                const rest = _.omit(e, userNameFields)
+                const rest = _.omit(e, loginFields)
                 if (!account) {
                     rest.id = id
                     rest.isGroup = false
