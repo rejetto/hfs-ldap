@@ -1,8 +1,9 @@
 exports.name = "LDAP authentication"
-exports.description = ""
-exports.version = 0.21
+exports.description = "Imports users and groups from, and authenticate against an LDAP server"
+exports.version = 0.22
 exports.apiRequired = 12
 exports.repo = "rejetto/hfs-ldap"
+exports.preview = "https://github.com/user-attachments/assets/e27c2708-74e5-48c3-b9c9-13526acd9179"
 
 exports.config = {
     url: { sm: 9, label: "LDAP server URL" },
@@ -27,9 +28,8 @@ exports.init = async api => {
     const { _ } = api
     const db = await api.openDb('data.kv')
     const id = exports.repo
-    const timer = setInterval(checkSync, 60_000)
     api.subscribeConfig(['url', 'checkCert', 'username', 'password'], checkConnection)
-    const undo = api.events.on('clearTextLogin', async req => {
+    api.events.on('clearTextLogin', async req => {
         const a = api.getAccount(req.username)
         if (a?.plugin?.id !== id) return
         const client = await connect(a.plugin.dn, req.password)
@@ -37,13 +37,8 @@ exports.init = async api => {
         client.destroy()
         return true
     })
+    api.setInterval(checkSync, 60_000)
     checkSync()
-    return {
-        async unload() {
-            undo()
-            clearInterval(timer)
-        }
-    }
 
     async function checkConnection() {
         void (await connect())?.destroy()
@@ -103,7 +98,6 @@ exports.init = async api => {
                 const account = api.getAccount(u)
                 const rest = _.omit(e, k)
                 rest.id = id
-                rest.isGroup = true
                 const props = { plugin: rest, belongs: [pluginGroup] }
                 if (!account) {
                     api.addAccount(u, props)
@@ -132,7 +126,7 @@ exports.init = async api => {
                 const account = api.getAccount(u)
                 const rest = _.omit(e, loginFields)
                 rest.id = id
-                rest.isGroup = false
+                rest.auth = true
                 const belongs = api.misc.wantArray(rest[groupField]).map(dn => dn2group[dn])
                     .concat(Object.values(dn2group).filter(g => {
                         const members = api.getAccount(g).plugin[api.getConfig('memberField')]
