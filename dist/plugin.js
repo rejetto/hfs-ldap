@@ -1,6 +1,6 @@
 exports.name = "LDAP authentication"
 exports.description = "Imports users and groups from, and authenticate against an LDAP server"
-exports.version = 0.22
+exports.version = 0.23
 exports.apiRequired = 12
 exports.repo = "rejetto/hfs-ldap"
 exports.preview = "https://github.com/user-attachments/assets/e27c2708-74e5-48c3-b9c9-13526acd9179"
@@ -93,21 +93,21 @@ exports.init = async api => {
             for (const e of entries) {
                 if (!e.dn) continue // invalid
                 const k = _.find(loginFields, k => e[k])
-                const u = e[k]
+                let u = e[k]
                 if (!u) continue
                 const account = api.getAccount(u)
                 const rest = _.omit(e, k)
                 rest.id = id
                 const props = { plugin: rest, belongs: [pluginGroup] }
                 if (!account) {
-                    api.addAccount(u, props)
-                    added.push(u)
+                    const a = await api.addAccount(u, props)
+                    added.push(u = a.username)
                 }
                 else if (account.plugin?.id !== id)
-                    conflicts.push(u)
+                    conflicts.push(u = account.username)
                 else {
-                    updated.push(u)
-                    api.updateAccount(account, props)
+                    updated.push(u = account.username)
+                    await api.updateAccount(account, props)
                 }
                 dn2group[e.dn] = u
             }
@@ -121,7 +121,7 @@ exports.init = async api => {
             for (const e of entries) {
                 if (!e.dn) continue // invalid
                 const k = _.find(loginFields, k => e[k])
-                const u = e[k]
+                let u = e[k]
                 if (!u) continue
                 const account = api.getAccount(u)
                 const rest = _.omit(e, loginFields)
@@ -136,14 +136,14 @@ exports.init = async api => {
                     belongs.push(pluginGroup)
                 const props = { plugin: rest, belongs }
                 if (!account) {
-                    api.addAccount(u, props)
-                    added.push(u)
+                    const a = await api.addAccount(u, props)
+                    added.push(u = a.username)
                 }
                 else if (account.plugin?.id !== id)
-                    conflicts.push(u)
+                    conflicts.push(u = account.username)
                 else {
-                    updated.push(u)
-                    api.updateAccount(account, props)
+                    updated.push(u = account.username)
+                    await api.updateAccount(account, props)
                 }
             }
 
