@@ -1,6 +1,6 @@
 exports.name = "LDAP authentication"
 exports.description = "Imports users and groups from, and authenticate against an LDAP server"
-exports.version = 0.23
+exports.version = 0.24
 exports.apiRequired = 12
 exports.repo = "rejetto/hfs-ldap"
 exports.preview = "https://github.com/user-attachments/assets/e27c2708-74e5-48c3-b9c9-13526acd9179"
@@ -11,11 +11,11 @@ exports.config = {
     username: { sm: 9, label: "Username", helperText: "Bind DN" },
     password: { sm: 3, inputProps: { type: 'password' }, },
     userBaseDN: { sm: 6, label: "Base DN users", defaultValue: 'dc=example,dc=com' },
-    userFilter: { sm: 6, defaultValue: '(objectClass=person)' },
+    userFilter: { sm: 6, defaultValue: '(objectClass=user)' },
     loginField: { xs: 4, placeholder: "automatic" },
     memberField: { xs: 4, defaultValue: 'member' },
     groupField: { xs: 4, defaultValue: 'memberOf' },
-    groupBaseDN: { sm: 6, label: "Base DN groups", defaultValue: 'dc=example,dc=com' },
+    groupBaseDN: { sm: 6, label: "Base DN groups", defaultValue: 'dc=example,dc=com', helperText: "Leave empty to skip groups" },
     groupFilter: { sm: 6, defaultValue: '(objectClass=group)' },
     scope: { xs: 3, type: 'select', defaultValue: 'sub', options: ['base', 'one', 'sub'] },
     syncEvery: { xs: 3, type: 'number', unit: 'hours', min: 0.01, step: 0.01, defaultValue: 0.1, required: true },
@@ -77,7 +77,8 @@ exports.init = async api => {
             const pluginGroup = _.findKey(api.getHfsConfig('accounts'), x => x.plugin?.id === id && !x.plugin.dn) // group is the only one without dn
                 || api.addAccount(groupName, { plugin: { id } }) && groupName
 
-            let entries = await client.search(api.getConfig('groupBaseDN'), {
+            const gdn = api.getConfig('groupBaseDN')
+            let entries = !gdn ? [] : await client.search(gdn, {
                 scope: api.getConfig('scope'),
                 filter: api.getConfig('groupFilter'),
                 sizeLimit: 1000,
@@ -112,7 +113,8 @@ exports.init = async api => {
                 dn2group[e.dn] = u
             }
 
-            entries = await client.search(api.getConfig('userBaseDN'), {
+            const udn = api.getConfig('userBaseDN')
+            entries = !udn ? [] : await client.search(udn, {
                 scope: api.getConfig('scope'),
                 filter: api.getConfig('userFilter'),
                 sizeLimit: 1000,
