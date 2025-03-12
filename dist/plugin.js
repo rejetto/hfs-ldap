@@ -1,6 +1,6 @@
 exports.name = "LDAP authentication"
 exports.description = "Imports users and groups from, and authenticate against an LDAP server"
-exports.version = 0.25
+exports.version = 0.32
 exports.apiRequired = 12
 exports.repo = "rejetto/hfs-ldap"
 exports.preview = "https://github.com/user-attachments/assets/e27c2708-74e5-48c3-b9c9-13526acd9179"
@@ -19,6 +19,7 @@ exports.config = {
     groupFilter: { sm: 6, defaultValue: '(objectClass=group)' },
     scope: { xs: 3, type: 'select', defaultValue: 'sub', options: ['base', 'one', 'sub'] },
     syncEvery: { xs: 3, type: 'number', unit: 'hours', min: 0.01, step: 0.01, defaultValue: 0.1, required: true },
+    fieldsToStore: { xs: 3, type: 'select', defaultValue: 'dn', options: ['dn', 'all'] }
 }
 exports.configDialog = {
     maxWidth: 'sm'
@@ -71,6 +72,7 @@ exports.init = async api => {
         if (getNext() > Date.now()) return
         const client = await connect()
         if (!client) return
+        const storeAll = api.getConfig('fieldsToStore') === 'all'
         try {
             const groupField = api.getConfig('groupField')
             const groupName = 'ldap-group'
@@ -90,17 +92,17 @@ exports.init = async api => {
             const conflicts = []
             const removed = []
             const updated = []
-            const dn2group = {}
+            const dn2name = {}
+            const group2members = {}
             // import groups
             for (const e of entries) {
-                if (!e.dn) continue // invalid
+                const {dn} = e
+                if (!dn) continue // invalid
                 const k = _.find(loginFields, k => e[k])
                 let u = e[k]
                 if (!u) continue
                 const account = api.getAccount(u)
-                const rest = _.omit(e, k)
-                rest.id = id
-                const props = { plugin: rest, belongs: [pluginGroup] }
+                const props = { belongs: [pluginGroup], plugin: { id, dn, ...storeAll && e } }
                 if (!account) {
                     const a = await api.addAccount(u, props)
                     added.push(u = a.username)
@@ -111,7 +113,8 @@ exports.init = async api => {
                     updated.push(u = account.username)
                     await api.updateAccount(account, props)
                 }
-                dn2group[e.dn] = u
+                dn2name[dn] = u
+                group2members[u] = e[api.getConfig('memberField')]
             }
 
             // import users
@@ -122,22 +125,16 @@ exports.init = async api => {
                 sizeLimit: 1000,
             })
             for (const e of entries) {
-                if (!e.dn) continue // invalid
+                const {dn} = e
+                if (!dn) continue // invalid
                 const k = _.find(loginFields, k => e[k])
                 let u = e[k]
                 if (!u) continue
                 const account = api.getAccount(u)
-                const rest = _.omit(e, loginFields)
-                rest.id = id
-                rest.auth = true
-                const belongs = api.misc.wantArray(rest[groupField]).map(dn => dn2group[dn]).filter(Boolean)
-                    .concat(Object.values(dn2group).filter(g => {
-                        const members = api.getAccount(g).plugin[api.getConfig('memberField')]
-                        return members?.includes(e.dn)
-                    }))
-                if (!belongs.length)
-                    belongs.push(pluginGroup)
-                const props = { plugin: rest, belongs }
+                const belongs = api.misc.wantArray(e[groupField]).map(dn => dn2name[dn])
+                    .concat(Object.entries(group2members).map(([g, members]) => members?.includes(dn) && g))
+                    .filter(Boolean)
+                const props = { belongs, plugin: { id, auth: true, dn, ...storeAll && e } }
                 if (!account) {
                     const a = await api.addAccount(u, props)
                     added.push(u = a.username)
