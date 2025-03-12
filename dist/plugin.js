@@ -1,6 +1,6 @@
 exports.name = "LDAP authentication"
 exports.description = "Imports users and groups from, and authenticate against an LDAP server"
-exports.version = 0.24
+exports.version = 0.25
 exports.apiRequired = 12
 exports.repo = "rejetto/hfs-ldap"
 exports.preview = "https://github.com/user-attachments/assets/e27c2708-74e5-48c3-b9c9-13526acd9179"
@@ -91,6 +91,7 @@ exports.init = async api => {
             const removed = []
             const updated = []
             const dn2group = {}
+            // import groups
             for (const e of entries) {
                 if (!e.dn) continue // invalid
                 const k = _.find(loginFields, k => e[k])
@@ -113,13 +114,13 @@ exports.init = async api => {
                 dn2group[e.dn] = u
             }
 
+            // import users
             const udn = api.getConfig('userBaseDN')
             entries = !udn ? [] : await client.search(udn, {
                 scope: api.getConfig('scope'),
                 filter: api.getConfig('userFilter'),
                 sizeLimit: 1000,
             })
-
             for (const e of entries) {
                 if (!e.dn) continue // invalid
                 const k = _.find(loginFields, k => e[k])
@@ -129,7 +130,7 @@ exports.init = async api => {
                 const rest = _.omit(e, loginFields)
                 rest.id = id
                 rest.auth = true
-                const belongs = api.misc.wantArray(rest[groupField]).map(dn => dn2group[dn])
+                const belongs = api.misc.wantArray(rest[groupField]).map(dn => dn2group[dn]).filter(Boolean)
                     .concat(Object.values(dn2group).filter(g => {
                         const members = api.getAccount(g).plugin[api.getConfig('memberField')]
                         return members?.includes(e.dn)
