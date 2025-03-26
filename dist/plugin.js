@@ -1,9 +1,12 @@
 exports.name = "LDAP authentication"
 exports.description = "Imports users and groups from, and authenticate against an LDAP server"
-exports.version = 0.32
+exports.version = 0.4
 exports.apiRequired = 12
 exports.repo = "rejetto/hfs-ldap"
 exports.preview = "https://github.com/user-attachments/assets/e27c2708-74e5-48c3-b9c9-13526acd9179"
+exports.changelog = [
+    { "version": 0.4, "message": "Added Limit-users option (before it was a hard limit=1000) and improved error message when the limit is reached" }
+]
 
 exports.config = {
     url: { sm: 9, label: "LDAP server URL" },
@@ -19,7 +22,8 @@ exports.config = {
     groupFilter: { sm: 6, defaultValue: '(objectClass=group)' },
     scope: { xs: 3, type: 'select', defaultValue: 'sub', options: ['base', 'one', 'sub'] },
     syncEvery: { xs: 3, type: 'number', unit: 'hours', min: 0.01, step: 0.01, defaultValue: 0.1, required: true },
-    fieldsToStore: { xs: 3, type: 'select', defaultValue: 'dn', options: ['dn', 'all'] }
+    fieldsToStore: { xs: 3, type: 'select', defaultValue: 'dn', options: ['dn', 'all'] },
+    limitUsers: { xs: 3, type: 'number', defaultValue: 1000, min: 1, required: true },
 }
 exports.configDialog = {
     maxWidth: 'sm'
@@ -29,7 +33,7 @@ exports.init = async api => {
     const { _ } = api
     const db = await api.openDb('data.kv')
     const id = exports.repo
-    api.subscribeConfig(['url', 'checkCert', 'username', 'password'], checkConnection)
+    api.subscribeConfig(['url', 'checkCert', 'username', 'password'], _.debounce(checkConnection))
     api.events.on('clearTextLogin', async req => {
         const a = api.getAccount(req.username)
         if (a?.plugin?.id !== id) return
@@ -122,7 +126,7 @@ exports.init = async api => {
             entries = !udn ? [] : await client.search(udn, {
                 scope: api.getConfig('scope'),
                 filter: api.getConfig('userFilter'),
-                sizeLimit: 1000,
+                sizeLimit: api.getConfig('limitUsers'),
             })
             for (const e of entries) {
                 const {dn} = e
@@ -159,7 +163,7 @@ exports.init = async api => {
             db.put('lastSync', new Date) // human-readable
         }
         catch(e) {
-            api.log(String(e))
+            api.log(e.name === 'SizeLimitExceededError' ? "The import got many accounts" : String(e))
         }
         finally {
             client.destroy()
