@@ -1,11 +1,12 @@
 exports.name = "LDAP authentication"
 exports.description = "Imports users and groups from, and authenticate against an LDAP server"
-exports.version = 0.4
+exports.version = 0.41
 exports.apiRequired = 12
 exports.repo = "rejetto/hfs-ldap"
 exports.preview = "https://github.com/user-attachments/assets/e27c2708-74e5-48c3-b9c9-13526acd9179"
 exports.changelog = [
-    { "version": 0.4, "message": "Added Limit-users option (before it was a hard limit=1000) and improved error message when the limit is reached" }
+    { "version": 0.4, "message": "Added Limit-users option (before it was a hard limit=1000) and improved error message when the limit is reached" },
+    { "version": 0.41, "message": "Updated LDAP component" }
 ]
 
 exports.config = {
