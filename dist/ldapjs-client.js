@@ -2206,7 +2206,7 @@ const assert = __nccwpck_require__(1706);
 const asn1 = __nccwpck_require__(2);
 const Protocol = __nccwpck_require__(4116);
 
-const _bufferEncoding = type =>  /;binary$/.test(type) ? 'base64' : 'utf8';
+const _bufferEncoding = type =>  type.endsWith(';binary') ? 'base64' : 'utf8';
 
 class Attribute {
   constructor(options) {
@@ -2925,7 +2925,9 @@ module.exports = class EqualityFilter extends parents.EqualityFilter {
 
   toBer(ber) {
     assert.ok(ber instanceof BerWriter, 'ber (BerWriter) required');
-
+    if (this.attribute.toLowerCase() === 'objectguid'){
+      this.raw = Buffer.from(this.value,'binary');
+    }
     ber.startSequence(FILTER_EQUALITY);
     ber.writeString(this.attribute);
     ber.writeBuffer(this.raw, OctetString);
@@ -3271,6 +3273,7 @@ const { getError, ConnectionError, TimeoutError, ProtocolError, LDAP_SUCCESS } =
 const { Add, Bind, Del, Modify, ModifyDN, Search, Unbind } = __nccwpck_require__(794);
 const { Response, SearchEntry, SearchReference, Parser } = __nccwpck_require__(8754);
 const parseUrl = __nccwpck_require__(8462);
+const OID = __nccwpck_require__(3170);
 
 class Client {
   constructor(options) {
@@ -3292,12 +3295,15 @@ class Client {
       } else {
         const qItem = this._queue.get(msg.id);
         if (qItem) {
-          const { resolve, reject, result, request } = qItem;
+          const { resolve, reject, result, request, controls } = qItem;
 
           if (msg instanceof Response) {
             if (msg.status !== LDAP_SUCCESS) {
               reject(getError(msg));
             }
+
+            controls.length = 0;
+            msg.controls.forEach((control) => controls.push(control));
 
             resolve(request instanceof Search ? result : msg.object);
           } else if (msg instanceof Error) {
@@ -3312,37 +3318,37 @@ class Client {
     });
   }
 
-  async add(entry, attributes) {
+  async add(entry, attributes, controls = []) {
     assert.string(entry, 'entry');
     assert.object(attributes, 'attributes');
 
-    return this._send(new Add({ entry, attributes: Attribute.fromObject(attributes) }));
+    return this._send(new Add({ entry, attributes: Attribute.fromObject(attributes), controls }));
   }
 
-  async bind(name, credentials) {
+  async bind(name, credentials, controls = []) {
     assert.string(name, 'name');
     assert.optionalString(credentials, 'credentials');
 
-    return this._send(new Bind({ name, credentials }));
+    return this._send(new Bind({ name, credentials, controls }));
   }
 
-  async del(entry) {
+  async del(entry, controls = []) {
     assert.string(entry, 'entry');
 
-    return this._send(new Del({ entry }));
+    return this._send(new Del({ entry, controls }));
   }
 
-  async modify(entry, change) {
+  async modify(entry, change, controls = []) {
     assert.string(entry, 'entry');
     assert.object(change, 'change');
 
     const changes = [];
     (Array.isArray(change) ? change : [change]).forEach(c => changes.push(...Change.fromObject(c)));
 
-    return this._send(new Modify({ entry, changes }));
+    return this._send(new Modify({ entry, changes, controls }));
   }
 
-  async modifyDN(entry, newName) {
+  async modifyDN(entry, newName, controls = []) {
     assert.string(entry, 'entry');
     assert.string(newName, 'newName');
 
@@ -3351,24 +3357,68 @@ class Client {
     if (newRdn.rdns.length !== 1) {
       return this._send(new ModifyDN({ entry, newRdn: parse(newRdn.rdns.shift().toString()), newSuperior: newRdn }));
     } else {
-      return this._send(new ModifyDN({ entry, newRdn }));
+      return this._send(new ModifyDN({ entry, newRdn, controls }));
     }
   }
 
-  async search(baseObject, options) {
+  async search(baseObject, options, controls = []) {
     assert.string(baseObject, 'baseObject');
     assert.object(options, 'options');
     assert.optionalString(options.scope, 'options.scope');
     assert.optionalString(options.filter, 'options.filter');
     assert.optionalNumber(options.sizeLimit, 'options.sizeLimit');
+    assert.optionalNumber(options.pageSize, 'options.pageSize');
     assert.optionalNumber(options.timeLimit, 'options.timeLimit');
     assert.optionalArrayOfString(options.attributes, 'options.attributes');
 
-    return this._send(new Search(Object.assign({ baseObject }, options)));
+    if (options.pageSize) {
+      let pageSize = options.pageSize;
+      if (pageSize > options.sizeLimit) pageSize = options.sizeLimit;
+
+      const controls0 = controls.filter((control) => {
+        return control.OID !== OID.PagedResults;
+      });
+
+      const pagedResults = {
+        OID: OID.PagedResults,
+        criticality: true,
+        value: {
+          size: pageSize,
+          cookie: ''
+        }
+      };
+
+      let cookie = '';
+      let results = [];
+      let hasNext = true;
+      while (hasNext) {
+        pagedResults.value.cookie = cookie;
+        controls.length = 0;
+        controls = controls.concat(controls0);
+        controls.push(pagedResults);
+
+        results = results.concat(await this._send(new Search(Object.assign({ baseObject, controls }, options))));
+
+        const responsePagedResults = controls.find((control) => {
+          return control.OID === OID.PagedResults;
+        });
+
+        if (responsePagedResults !== undefined && responsePagedResults.value.cookie !== '') {
+          cookie = responsePagedResults.value.cookie;
+        } else {
+          hasNext = false;
+        }
+      }
+
+      return results;
+
+    } else {
+      return this._send(new Search(Object.assign({ baseObject, controls }, options)));
+    }
   }
 
-  async unbind() {
-    return this._send(new Unbind());
+  async unbind(controls = []) {
+    return this._send(new Unbind({controls}));
   }
 
   async destroy() {
@@ -3432,7 +3482,7 @@ class Client {
 
     return new Promise((resolve, reject) => {
       try {
-        this._queue.set(message.id, { resolve, reject, request: message, result: [] });
+        this._queue.set(message.id, { resolve, reject, request: message, result: [], controls: message.controls });
         this._socket.write(message.toBer());
 
         if (message instanceof Unbind) {
@@ -3622,12 +3672,41 @@ module.exports = class extends Request {
 /***/ 9464:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
-const { BerWriter } = __nccwpck_require__(2);
+const asn1 = __nccwpck_require__(2);
+const BerWriter = asn1.BerWriter;
+const { LDAP_CONTROLS } = __nccwpck_require__(4116);
+const OID = __nccwpck_require__(3170);
 
 let id = 0;
 const nextID = () => {
   id = Math.max(1, (id + 1) % 2147483647);
   return id;
+};
+
+const controlToBer = (control, writer) => {
+  writer.startSequence();
+  writer.writeString(control.OID);
+  writer.writeBoolean(control.criticality);
+
+  const ber = new BerWriter();
+  ber.startSequence();
+  switch (control.OID) {
+    case OID.PagedResults:
+      ber.writeInt(control.value.size);
+      if (control.value.cookie === '') {
+        ber.writeString('');
+      } else {
+        ber.writeBuffer(control.value.cookie, asn1.Ber.OctetString);
+      }
+      break;
+    // Add New OID controls here
+    default:
+  }
+
+  ber.endSequence();
+  writer.writeBuffer(ber.buffer, 0x04);
+
+  writer.endSequence();
 };
 
 module.exports = class {
@@ -3642,6 +3721,15 @@ module.exports = class {
     writer.startSequence(this.protocolOp);
     writer = this._toBer(writer);
     writer.endSequence();
+
+    if (this.controls.length > 0) {
+      writer.startSequence(LDAP_CONTROLS);
+      this.controls.forEach((control) => {
+        controlToBer(control, writer);
+      });
+      writer.endSequence();
+    }
+
     writer.endSequence();
     return writer.buffer;
   }
@@ -3775,7 +3863,13 @@ class Parser extends EventEmitter {
       return;
     }
 
-    if (ber.remain < ber.length) {
+    // If ber.length == 0, then we do not have a complete chunk
+    // and can't proceed with parsing.
+    // Allowing this function to continue results in an infinite loop
+    // and due to the recursive nature of this function quickly 
+    // hits the stack call size limit.
+    // This only happens with very large responses.
+    if (ber.remain < ber.length || ber.length === 0) {
       return;
     }
 
@@ -3811,7 +3905,47 @@ module.exports = Parser;
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
 const assert = __nccwpck_require__(1706);
-const { LDAP_REP_REFERRAL } = __nccwpck_require__(4116);
+const asn1 = __nccwpck_require__(2);
+const Ber = asn1.Ber;
+const BerReader = asn1.BerReader;
+const { LDAP_REP_REFERRAL, LDAP_CONTROLS } = __nccwpck_require__(4116);
+const OID = __nccwpck_require__(3170);
+
+const getControl = (ber) => {
+  if (ber.readSequence() === null) { return null; }
+
+  const control = {
+    OID: '',
+    criticality: false,
+    value: null
+  };
+
+  if (ber.length) {
+    const end = ber.offset + ber.length;
+
+    control.OID = ber.readString();
+    if (ber.offset < end && ber.peek() === Ber.Boolean) control.criticality = ber.readBoolean();
+
+    if (ber.offset < end) control.value = ber.readString(Ber.OctetString, true);
+
+    const controlBer = new BerReader(control.value);
+    switch (control.OID) {
+      case OID.PagedResults:
+        controlBer.readSequence();
+        control.value = {};
+        control.value.size = controlBer.readInt();
+        control.value.cookie = controlBer.readString(asn1.Ber.OctetString, true);
+        if (control.value.cookie.length === 0) {
+          control.value.cookie = '';
+        }
+        break;
+      // Add New OID controls here
+      default:
+    }
+  }
+
+  return control;
+};
 
 module.exports = class {
   constructor(options) {
@@ -3819,8 +3953,9 @@ module.exports = class {
     assert.optionalString(options.matchedDN);
     assert.optionalString(options.errorMessage);
     assert.optionalArrayOfString(options.referrals);
+    assert.optionalArrayOfObject(options.controls);
 
-    Object.assign(this, { status: 0, matchedDN: '', errorMessage: '', referrals: [], type: 'Response' }, options);
+    Object.assign(this, { status: 0, matchedDN: '', errorMessage: '', referrals: [], type: 'Response', controls: [] }, options);
   }
 
   get object() {
@@ -3836,6 +3971,15 @@ module.exports = class {
       const end = ber.offset + ber.length;
       while (ber.offset < end) {
         this.referrals.push(ber.readString());
+      }
+    }
+
+    if (ber.peek() === LDAP_CONTROLS) {
+      ber.readSequence();
+      const end = ber.offset + ber.length;
+      while (ber.offset < end) {
+        const c = getControl(ber);
+        if (c) { this.controls.push(c); }
       }
     }
 
@@ -3917,6 +4061,21 @@ module.exports = class extends Response {
     return true;
   }
 };
+
+
+/***/ }),
+
+/***/ 3170:
+/***/ ((module) => {
+
+/**
+ * @see {@link https://ldap.com/ldap-oid-reference-guide/}
+ */
+const OID = {
+	PagedResults: '1.2.840.113556.1.4.319'
+};
+
+module.exports = OID;
 
 
 /***/ }),
