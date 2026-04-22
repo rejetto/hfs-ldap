@@ -1,12 +1,13 @@
 exports.name = "LDAP authentication"
 exports.description = "Imports users and groups from, and authenticate against an LDAP server"
-exports.version = 0.41
+exports.version = 0.42
 exports.apiRequired = 12
 exports.repo = "rejetto/hfs-ldap"
 exports.preview = ["https://github.com/user-attachments/assets/e27c2708-74e5-48c3-b9c9-13526acd9179"]
 exports.changelog = [
-    { "version": 0.4, "message": "Added Limit-users option (before it was a hard limit=1000) and improved error message when the limit is reached" },
-    { "version": 0.41, "message": "Updated LDAP component" }
+    { "version": 0.42, "message": "Fix: nested LDAP group imports" },
+    { "version": 0.41, "message": "Updated LDAP component" },
+    { "version": 0.4, "message": "Added Limit-users option (before it was a hard limit=1000) and improved error message when the limit is reached" }
 ]
 
 exports.config = {
@@ -99,6 +100,7 @@ exports.init = async api => {
             const updated = []
             const dn2name = {}
             const group2members = {}
+            const groupAccounts = []
             // import groups
             for (const e of entries) {
                 const {dn} = e
@@ -111,15 +113,24 @@ exports.init = async api => {
                 if (!account) {
                     const a = await api.addAccount(u, props)
                     added.push(u = a.username)
+                    groupAccounts.push({ account: a, entry: e })
                 }
                 else if (account.plugin?.id !== id)
                     conflicts.push(u = account.username)
                 else {
                     updated.push(u = account.username)
-                    await api.updateAccount(account, props)
+                    groupAccounts.push({ account, entry: e })
                 }
                 dn2name[dn] = u
                 group2members[u] = e[api.getConfig('memberField')]
+            }
+
+            // update group inheritance after all groups exist, because HFS drops missing `belongs` references
+            for (const { account, entry } of groupAccounts) {
+                await api.updateAccount(account, {
+                    belongs: getLdapBelongs(entry, [pluginGroup]),
+                    plugin: { id, dn: entry.dn, ...storeAll && entry }
+                })
             }
 
             // import users
@@ -136,9 +147,7 @@ exports.init = async api => {
                 let u = e[k]
                 if (!u) continue
                 const account = api.getAccount(u)
-                const belongs = api.misc.wantArray(e[groupField]).map(dn => dn2name[dn])
-                    .concat(Object.entries(group2members).map(([g, members]) => members?.includes(dn) && g))
-                    .filter(Boolean)
+                const belongs = getLdapBelongs(e)
                 const props = { belongs, plugin: { id, auth: true, dn, ...storeAll && e } }
                 if (!account) {
                     const a = await api.addAccount(u, props)
@@ -162,6 +171,14 @@ exports.init = async api => {
             if (removed.length) api.log(`accounts removed: ${removed.join(', ')}`)
             if (conflicts.length) api.log(`conflicts found: ${conflicts.join(', ')}`)
             db.put('lastSync', new Date) // human-readable
+
+            function getLdapBelongs(entry, baseBelongs=[]) {
+                // LDAP servers may expose membership on the entry or only on the containing group
+                return _.uniq(baseBelongs
+                    .concat(api.misc.wantArray(entry[groupField]).map(dn => dn2name[dn]))
+                    .concat(Object.entries(group2members).map(([g, members]) => api.misc.wantArray(members).includes(entry.dn) && g))
+                    .filter(Boolean))
+            }
         }
         catch(e) {
             api.log(e.name === 'SizeLimitExceededError' ? "The import got many accounts" : String(e))
